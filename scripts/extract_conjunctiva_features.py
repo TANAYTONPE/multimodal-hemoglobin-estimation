@@ -7,6 +7,13 @@ and caches them into data/cached_features/features_conjunctiva.npz.
 """
 
 import os
+import sys
+
+# Ensure src/ is on sys.path
+_SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+
 import pandas as pd
 import numpy as np
 from PIL import Image

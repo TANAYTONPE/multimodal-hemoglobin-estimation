@@ -212,45 +212,107 @@ pip install -e .
 
 ---
 
-## 💻 Running the Application & Scripts
+## 📖 Step-by-Step How to Use
 
-### 1. Launch the Interactive Web Application
+### Step 1: Environment Setup & Installation
 ```bash
-streamlit run app.py
-```
-Open your browser at `http://localhost:8501`. You can upload any clinical image (or test with preloaded samples) and immediately receive:
-- Tissue ROI bounding box localization
-- Predicted Hemoglobin in $g/dL$
-- WHO Anemia classification chip (Normal, Mild, Moderate, Severe)
-- Quantitative optical biomarkers (Erythema Index, Norm-R, CIELAB $a^*$)
+# 1. Clone the repository
+git clone https://github.com/TANAYTONPE/multimodal-hemoglobin-estimation.git
+cd multimodal-hemoglobin-estimation
 
-### 2. Re-train Models & Regenerate Benchmark Plots
-```bash
-python scripts/train_evaluate_all.py
-```
-This script reads the precomputed cached feature matrices, trains Models 1 through 4, validates Model 6, updates `results/model_comparison.csv`, and generates publication figures in `results/`.
+# 2. Create and activate a Python virtual environment (Python 3.9 - 3.12 recommended)
+# Windows PowerShell:
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 
-### 3. Re-ingest the Eyes Dataset from Cache
-```bash
-python scripts/ingest_eyes_dataset.py
-python scripts/extract_conjunctiva_features.py
+# Linux / macOS:
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 3. Install dependencies and install package in editable mode
+pip install --upgrade pip
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ---
 
-## 🧪 Running the Test Suite
+### Step 2: Running the Interactive Web App (Recommended)
+Launch the Streamlit research interface:
+```bash
+streamlit run app.py
+```
+The browser will automatically open at `http://localhost:8501`.
 
-Run all automated unit and integration tests:
+#### 🧭 UI Walkthrough:
+1. **Tab 1 — Clinical Analysis (Single Tissue Image)**:
+   * **Select Modality**: Choose **Fingernail Bed (Model 1)**, **Finger Skin (Model 2)**, or **Palpebral Conjunctiva (Model 3)** from the dropdown.
+   * **Load Image**: Either drag and drop a local JPG/PNG photo or select one of the built-in reference clinical photos from the *"Or Load Reference Sample Image"* dropdown.
+   * **Inspect ROI Localization**: The system automatically detects the tissue region of interest, displays the bounding box overlay on the original photo, and shows the isolated 224×224 px crop.
+   * **Review Diagnosis**: View the predicted Hemoglobin concentration ($g/dL$), the color-coded WHO anemia severity badge (🟢 Normal, 🟡 Mild, 🟠 Moderate, 🔴 Severe), and the optical biomarkers table (Normalized Red, Erythema Index, CIELAB $a^*$).
+
+2. **Tab 2 — Multimodal Fusion Studio (Paired Inputs)**:
+   * Upload paired images (e.g., both a fingernail and a skin photo from the same subject).
+   * Run **Model 4 (Dual-Branch Fusion)** to compute the combined feature prediction.
+   * Test **Model 6 (Tri-Modal Network)** to observe forward propagation across all 3 tissue branches simultaneously.
+
+3. **Tab 3 — Model Benchmark & Comparison Dashboard**:
+   * Inspect side-by-side performance metrics across all evaluated architectures.
+   * View high-resolution publication charts:
+     - Predicted vs. Actual laboratory correlation plots.
+     - Residual error distribution plots.
+     - Absolute error histograms.
+   * Download the complete patient-level prediction CSV.
+
+4. **Tab 4 — Scientific Methodology**:
+   * Review optical colorimetry equations, deep latent feature dimensions, and clinical dataset provenance.
+
+---
+
+### Step 3: Using the Python API in Your Own Code
+You can import HemoLens directly as a Python library:
+
+```python
+from PIL import Image
+from src import get_inference_engine, auto_detect_roi, extract_color_features
+
+# 1. Initialize the singleton inference engine
+engine = get_inference_engine()
+
+# 2. Load any clinical photograph
+eye_image = Image.open("data/sample_images/sample_conjunctiva.jpg")
+
+# 3. Run automated prediction
+result = engine.predict_single(eye_image, modality="conjunctiva")
+
+print(f"Model Used   : {result['model_name']}")
+print(f"Predicted Hb : {result['predicted_hb']} g/dL")
+print(f"Diagnosis    : {result['who_label']}")
+print(f"Erythema Idx : {result['color_stats']['erythema_index']:.3f}")
+```
+
+---
+
+### Step 4: Re-training Models & Benchmarking (CLI)
+To retrain the machine learning regressors on cached embeddings and regenerate all comparison plots:
+```bash
+python scripts/train_evaluate_all.py
+```
+*Outputs will be saved directly into `results/` and updated checkpoints into `checkpoints/`.*
+
+To run a deep convolutional training loop with PyTorch and Cosine Annealing:
+```bash
+python scripts/train.py --epochs 30 --lr 3e-4 --batch_size 16
+```
+
+---
+
+### Step 5: Running the Automated Test Suite
+To verify that all components, ROIs, models, and tests pass:
 ```bash
 python -m unittest discover tests
 ```
-*Output*:
-```
-.....................
-Ran 21 tests in 1.489s
-OK
-Smoke Test Passed: Model 6 three-modality tensor forward propagation is valid!
-```
+*Expected output: `Ran 21 tests in ~1.4s ... OK`.*
 
 ---
 

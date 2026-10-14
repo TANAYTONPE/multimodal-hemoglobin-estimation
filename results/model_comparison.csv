@@ -1,0 +1,9 @@
+Model ID,Model Name,Modalities,MAE (g/dL),RMSE (g/dL),R^2,Test Patients,Training Status
+Baseline-Nail,Fingernail Color Baseline,Fingernail (Color Only),1.511,2.035,0.4353,38,Evaluated on Clinical Data
+Baseline-Skin,Skin Color Baseline,Skin (Color Only),1.667,2.362,0.2395,38,Evaluated on Clinical Data
+Model 1,Fingernail CNN + Color Regressor,Fingernail ROI,1.577,2.173,0.356,38,Trained & Evaluated (Clinical)
+Model 2,Skin CNN + Color Regressor,Skin Tissue ROI,1.797,2.627,0.0593,38,Trained & Evaluated (Clinical)
+Model 3,Conjunctiva CNN + Color Regressor,Palpebral Conjunctiva ROI,1.392,1.695,0.4877,31,"Trained & Evaluated (Eyes-defy-anemia, 201 pts)"
+Model 4,Fingernail + Skin Feature Fusion,Fingernail + Skin (Paired),1.624,2.274,0.2949,38,Trained & Evaluated (Clinical Paired)
+Model 5,Fingernail + Conjunctiva Fusion,Fingernail + Conjunctiva,Pending,Pending,Pending,0,Architecture Ready (Awaiting Paired Dataset)
+Model 6,Tri-Modal Architecture (Proposed),Fingernail + Skin + Conjunctiva,Pending,Pending,Pending,0,Forward Pass Verified (Awaiting Tri-Modal Dataset)

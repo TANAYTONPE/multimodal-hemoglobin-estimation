@@ -40,5 +40,5 @@ Thumbs.db
 data/eyes_dataset/
 data/photo/
 
-# Old model runs
-checkpoints/20261007_*/
+# Training runs & intermediate checkpoints
+checkpoints/202*_*

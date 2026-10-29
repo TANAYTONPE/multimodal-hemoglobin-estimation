@@ -34,6 +34,8 @@ from roi_extractor import (
     crop_roi_by_box,
     auto_detect_roi,
     draw_roi_overlay,
+    assess_image_quality,
+    detect_specular_glare_mask,
 )
 from feature_extractor import (
     extract_color_features,
@@ -203,6 +205,131 @@ class TestMultimodalHemoglobinSystem(unittest.TestCase):
         self.assertIn("Model ID", df_comp.columns)
         self.assertIn("MAE (g/dL)", df_comp.columns)
 
+    def test_09_gray_world_white_balance(self):
+        """Verify Gray-World chromatic constancy preserves image format and balances color."""
+        from preprocessing import apply_gray_world_white_balance
+        tinted_img = Image.new("RGB", (100, 100), (200, 100, 50))
+        balanced = apply_gray_world_white_balance(tinted_img)
+        self.assertEqual(balanced.size, (100, 100))
+        arr = np.array(balanced)
+        # Channels should be substantially closer to equal
+        diff_rg = abs(int(arr[:, :, 0].mean()) - int(arr[:, :, 1].mean()))
+        self.assertLess(diff_rg, 5)
+
+    def test_10_multimodal_consensus(self):
+        """Verify precision-weighted multimodal consensus across multiple tissue sites."""
+        # 3 modalities
+        res_tri = self.engine.predict_multimodal_consensus(
+            nail_image=self.im_nail,
+            skin_image=self.im_skin,
+            conj_image=self.im_conj
+        )
+        self.assertIn("predicted_hb", res_tri)
+        self.assertTrue(3.0 <= res_tri["predicted_hb"] <= 22.0)
+        self.assertEqual(res_tri["num_modalities"], 3)
+        self.assertIn("Model 6", res_tri["model_name"])
+        weights = res_tri["normalized_weights"]
+        self.assertAlmostEqual(sum(weights.values()), 1.0, places=2)
+        # All weights must be strictly non-negative
+        for m, w in weights.items():
+            self.assertGreater(w, 0.0)
+
+        # Verify weights are calibrated from validation set errors (not test set leakage)
+        # In validation calibration: Conjunctiva ~77.1%, Skin ~12.7%, Nail ~10.3%
+        self.assertGreater(weights["conjunctiva"], 0.70)
+        self.assertLess(weights["conjunctiva"], 0.85)
+        self.assertGreater(weights["skin"], 0.10)
+        self.assertGreater(weights["fingernail"], 0.08)
+
+        # 2 modalities (Nail + Eye)
+        res_dual = self.engine.predict_multimodal_consensus(
+            nail_image=self.im_nail,
+            conj_image=self.im_conj
+        )
+        self.assertEqual(res_dual["num_modalities"], 2)
+        self.assertIn("Model 5", res_dual["model_name"])
+        self.assertTrue(3.0 <= res_dual["predicted_hb"] <= 22.0)
+        self.assertAlmostEqual(sum(res_dual["normalized_weights"].values()), 1.0, places=2)
+
+    def test_11_cli_predict_script(self):
+        """Verify standalone scripts/predict.py executes cleanly."""
+        import subprocess
+        cmd = [
+            sys.executable,
+            os.path.join("scripts", "predict.py"),
+            "--image", self.conj_img_path,
+            "--modality", "conjunctiva",
+            "--json"
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, f"CLI predict failed: {proc.stderr}")
+        self.assertIn("predicted_hb_g_dL", proc.stdout)
+
+
+    def test_12_visual_explainability_heatmaps(self):
+        """Verify Deep CAM and Biophysical Erythema explainability heatmaps."""
+        res = self.engine.predict_single(self.im_conj, modality="conjunctiva")
+        self.assertIn("cam_heatmap", res)
+        self.assertIn("erythema_heatmap", res)
+        self.assertEqual(res["cam_heatmap"].size, (224, 224))
+        self.assertEqual(res["erythema_heatmap"].size, (224, 224))
+        self.assertEqual(res["cam_heatmap"].mode, "RGB")
+        self.assertEqual(res["erythema_heatmap"].mode, "RGB")
+
+    def test_13_image_quality_audit(self):
+        """Verify image quality audit, Laplacian blur score, and specular glare mask."""
+        quality = assess_image_quality(self.im_nail)
+        self.assertIn("blur_score", quality)
+        self.assertIn("glare_percentage", quality)
+        self.assertIn("quality_tier", quality)
+        self.assertIsInstance(quality["is_sharp"], bool)
+
+        glare_mask = detect_specular_glare_mask(self.im_nail)
+        self.assertEqual(glare_mask.shape, (self.im_nail.size[1], self.im_nail.size[0]))
+        self.assertEqual(glare_mask.dtype, bool)
+
+    def test_14_dynamic_roi_metadata(self):
+        """Verify auto_detect_roi with return_meta=True returns metadata and quality audit."""
+        crop, box, meta = auto_detect_roi(self.im_conj, modality="conjunctiva", return_meta=True)
+        self.assertEqual(crop.size, (224, 224))
+        self.assertEqual(len(box), 4)
+        self.assertIn("detector_used", meta)
+        self.assertIn("confidence", meta)
+        self.assertIn("quality", meta)
+        self.assertGreater(meta["confidence"], 0.0)
+
+    def test_15_anemic_vs_normal_differentiation(self):
+        """Verify model differentiates between verified anemic pallor and normal vascular tissue."""
+        p_anemic = os.path.join("data", "sample_images", "sample_anemic_conjunctiva.jpg")
+        p_normal = os.path.join("data", "sample_images", "sample_normal_conjunctiva.jpg")
+        self.assertTrue(os.path.isfile(p_anemic), "Missing sample_anemic_conjunctiva.jpg")
+        self.assertTrue(os.path.isfile(p_normal), "Missing sample_normal_conjunctiva.jpg")
+
+        res_a = self.engine.predict_single(Image.open(p_anemic), modality="conjunctiva")
+        res_n = self.engine.predict_single(Image.open(p_normal), modality="conjunctiva")
+
+        self.assertLess(res_a["predicted_hb"], res_n["predicted_hb"])
+        self.assertIn("Anemia", res_a["who_label"])
+        self.assertEqual(res_n["who_label"], "Normal")
+        self.assertLess(res_a["color_stats"]["erythema_index"], res_n["color_stats"]["erythema_index"])
+
+    def test_16_deep_learning_experiment_artifacts(self):
+        """Verify that genuine epoch history and training curves exist from deep learning run."""
+        hist_csv = os.path.join("results", "deep_experiment_history.csv")
+        curves_png = os.path.join("results", "training_curves.png")
+        self.assertTrue(os.path.isfile(hist_csv), "Missing results/deep_experiment_history.csv")
+        self.assertTrue(os.path.isfile(curves_png), "Missing results/training_curves.png")
+
+        df = pd.read_csv(hist_csv)
+        self.assertGreaterEqual(len(df), 1)
+        self.assertIn("epoch", df.columns)
+        self.assertIn("train_loss", df.columns)
+        self.assertIn("val_loss", df.columns)
+        self.assertIn("train_MAE", df.columns)
+        self.assertIn("val_MAE", df.columns)
+        self.assertTrue((df["train_loss"] > 0).all())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

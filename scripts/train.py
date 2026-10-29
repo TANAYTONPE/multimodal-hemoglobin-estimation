@@ -159,10 +159,11 @@ def train(args):
         csv_path=args.csv,
         root_dir=args.root,
         batch_size=args.batch_size,
+        num_workers=args.num_workers,
     )
 
     # ── Model ──
-    model = HemoglobinNet(dropout=args.dropout).to(DEVICE)
+    model = HemoglobinNet(dropout=args.dropout, freeze_backbone=args.freeze_backbone).to(DEVICE)
     total_params     = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Parameters: total={total_params:,}  trainable={trainable_params:,}\n")
@@ -236,19 +237,58 @@ def train(args):
     print(f"  Training history saved -> {hist_path}")
     print(f"  Best model saved       -> {ckpt_dir}/best_model.pth\n")
 
+    # ── Save to results and generate loss curves ──
+    os.makedirs("results", exist_ok=True)
+    results_hist_path = os.path.join("results", "deep_experiment_history.csv")
+    hist_df.to_csv(results_hist_path, index=False)
+    print(f"  Experiment history saved -> {results_hist_path}")
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        axes[0].plot(hist_df["epoch"], hist_df["train_loss"], label="Train Loss", marker="o", color="#2563eb")
+        axes[0].plot(hist_df["epoch"], hist_df["val_loss"], label="Val Loss", marker="s", color="#dc2626")
+        axes[0].set_xlabel("Epoch")
+        axes[0].set_ylabel("Huber Loss")
+        axes[0].set_title("Deep Experiment: Huber Loss vs Epoch")
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        axes[1].plot(hist_df["epoch"], hist_df["train_MAE"], label="Train MAE", marker="o", color="#2563eb")
+        axes[1].plot(hist_df["epoch"], hist_df["val_MAE"], label="Val MAE", marker="s", color="#dc2626")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("MAE (g/dL)")
+        axes[1].set_title("Deep Experiment: MAE vs Epoch")
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        curves_path = os.path.join("results", "training_curves.png")
+        plt.savefig(curves_path, dpi=150)
+        plt.close()
+        print(f"  Training curves saved  -> {curves_path}")
+    except Exception as e:
+        print(f"  Note: Could not generate training curves plot: {e}")
+
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 def parse_args():
     p = argparse.ArgumentParser(description="Train hemoglobin regression model")
-    p.add_argument("--csv",        default="data/metadata.csv", help="Path to metadata CSV")
-    p.add_argument("--root",       default=".",                 help="Project root dir")
-    p.add_argument("--epochs",     type=int,   default=30,      help="Number of epochs")
-    p.add_argument("--lr",         type=float, default=3e-4,    help="Learning rate")
-    p.add_argument("--wd",         type=float, default=1e-4,    help="Weight decay")
-    p.add_argument("--batch_size", type=int,   default=32,      help="Batch size")
-    p.add_argument("--dropout",    type=float, default=0.3,     help="Dropout in head")
+    p.add_argument("--csv",             default="data/metadata.csv", help="Path to metadata CSV")
+    p.add_argument("--root",            default=".",                 help="Project root dir")
+    p.add_argument("--epochs",          type=int,   default=30,      help="Number of epochs")
+    p.add_argument("--lr",              type=float, default=3e-4,    help="Learning rate")
+    p.add_argument("--wd",              type=float, default=1e-4,    help="Weight decay")
+    p.add_argument("--batch_size",      type=int,   default=32,      help="Batch size")
+    p.add_argument("--dropout",         type=float, default=0.3,     help="Dropout in head")
+    p.add_argument("--freeze_backbone", action="store_true",         help="Freeze pretrained backbone weights")
+    p.add_argument("--num_workers",     type=int,   default=0,       help="DataLoader worker count (0 for main thread)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     train(parse_args())
+

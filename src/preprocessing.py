@@ -28,6 +28,32 @@ MEAN = [0.485, 0.456, 0.406]
 STD  = [0.229, 0.224, 0.225]
 
 
+# ── Color Constancy & Illumination Correction ──────────────────────────────────
+def apply_gray_world_white_balance(img: Image.Image) -> Image.Image:
+    """
+    Applies Gray-World chromatic constancy to correct smartphone ambient lighting
+    and color-cast drift while preserving vascular erythema.
+    Scales R, G, B channels such that the average reflectance equals the gray mean.
+    """
+    import numpy as np
+    arr = np.array(img.convert("RGB"), dtype=np.float32)
+    mean_r = float(np.mean(arr[:, :, 0]))
+    mean_g = float(np.mean(arr[:, :, 1]))
+    mean_b = float(np.mean(arr[:, :, 2]))
+
+    gray = (mean_r + mean_g + mean_b) / 3.0
+    if mean_r > 1e-4 and mean_g > 1e-4 and mean_b > 1e-4:
+        scale_r = gray / mean_r
+        scale_g = gray / mean_g
+        scale_b = gray / mean_b
+
+        arr[:, :, 0] = np.clip(arr[:, :, 0] * scale_r, 0, 255)
+        arr[:, :, 1] = np.clip(arr[:, :, 1] * scale_g, 0, 255)
+        arr[:, :, 2] = np.clip(arr[:, :, 2] * scale_b, 0, 255)
+
+    return Image.fromarray(arr.astype(np.uint8))
+
+
 # ── Transforms ─────────────────────────────────────────────────────────────────
 def get_train_transforms(color_preserving: bool = True) -> T.Compose:
     """

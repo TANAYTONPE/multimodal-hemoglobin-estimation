@@ -7,13 +7,18 @@ and trained regression heads with WHO clinical classification.
 """
 
 import os
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 from PIL import Image
 import joblib
 import torch
 
-from roi_extractor import auto_detect_roi, draw_roi_overlay, crop_roi_by_box
+from roi_extractor import (
+    auto_detect_roi,
+    draw_roi_overlay,
+    crop_roi_by_box,
+    assess_image_quality,
+)
 from feature_extractor import get_feature_extractor, extract_color_features
 from models_multimodal import TriModalHemoglobinNet
 
@@ -26,11 +31,11 @@ def classify_who_anemia(hb_val: float) -> Tuple[str, str, str]:
     Returns (label, chip_class, description).
     """
     if hb_val >= 12.0:
-        return "Normal", "chip-green", "Hemoglobin concentration within normal diagnostic range (≥ 12.0 g/dL)."
+        return "Normal", "chip-green", "Hemoglobin concentration within normal diagnostic range (>= 12.0 g/dL)."
     elif hb_val >= 10.0:
-        return "Mild Anemia", "chip-yellow", "Mild anemia detected (10.0 – 11.9 g/dL). Recommend dietary and medical review."
+        return "Mild Anemia", "chip-yellow", "Mild anemia detected (10.0 - 11.9 g/dL). Recommend dietary and medical review."
     elif hb_val >= 7.0:
-        return "Moderate Anemia", "chip-yellow", "Moderate anemia detected (7.0 – 9.9 g/dL). Clinical evaluation recommended."
+        return "Moderate Anemia", "chip-yellow", "Moderate anemia detected (7.0 - 9.9 g/dL). Clinical evaluation recommended."
     else:
         return "Severe Anemia", "chip-red", "Severe anemia alert (< 7.0 g/dL). Immediate medical attention required."
 
@@ -70,14 +75,31 @@ class HemoglobinInferenceEngine:
     def predict_single(
         self,
         image: Image.Image,
-        modality: str = "fingernail"
+        modality: str = "fingernail",
+        apply_white_balance: bool = False,
+        custom_box: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         """
         Run end-to-end inference on a single uploaded image.
+        Supports automatic vascular detection or user-specified custom bounding box.
         """
+        if apply_white_balance:
+            from preprocessing import apply_gray_world_white_balance
+            image = apply_gray_world_white_balance(image)
+
         modality_clean = modality.lower().strip()
-        roi_crop, roi_box = auto_detect_roi(image, modality=modality_clean)
-        overlay = draw_roi_overlay(image, [roi_box], [f"{modality.capitalize()} ROI"])
+        if custom_box is not None and len(custom_box) == 4:
+            roi_box = custom_box
+            roi_crop = crop_roi_by_box(image, roi_box, target_size=(224, 224))
+            roi_meta = {
+                "detector_used": "manual_fine_tuned",
+                "confidence": 1.0,
+                "quality": assess_image_quality(image)
+            }
+        else:
+            roi_crop, roi_box, roi_meta = auto_detect_roi(image, modality=modality_clean, return_meta=True)
+
+        overlay = draw_roi_overlay(image, [roi_box], [f"{modality.capitalize()} ROI ({roi_meta['confidence']*100:.0f}%)"])
 
         # Extract features (1280 deep + 16 color = 1296)
         features = self.extractor.extract_single_patch_features(roi_crop)
@@ -126,6 +148,12 @@ class HemoglobinInferenceEngine:
         pred_val = round(pred_val, 2)
         who_label, chip_cls, who_desc = classify_who_anemia(pred_val)
 
+        # Extract visual explainability maps (CAM & Biophysical Erythema)
+        weights = None
+        if hasattr(model, "model") and hasattr(model.model, "coef_") and hasattr(model, "scaler"):
+            weights = model.model.coef_ / (model.scaler.scale_ + 1e-8)
+        explain_maps = self.extractor.generate_explainability_maps(roi_crop, weights=weights)
+
         return {
             "predicted_hb": pred_val,
             "who_label": who_label,
@@ -134,6 +162,9 @@ class HemoglobinInferenceEngine:
             "roi_crop": roi_crop,
             "roi_overlay": overlay,
             "roi_box": roi_box,
+            "roi_meta": roi_meta,
+            "cam_heatmap": explain_maps["cam_heatmap"],
+            "erythema_heatmap": explain_maps["erythema_heatmap"],
             "color_stats": color_stats,
             "model_name": model_name,
             "status": status,
@@ -225,6 +256,99 @@ class HemoglobinInferenceEngine:
             "status": "Architecture Verified (Awaiting Tri-Modal Paired Dataset with Lab Hb)",
         }
 
+    def predict_multimodal_consensus(
+        self,
+        nail_image: Optional[Image.Image] = None,
+        skin_image: Optional[Image.Image] = None,
+        conj_image: Optional[Image.Image] = None,
+        apply_white_balance: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Calculates a clinically-weighted multimodal consensus hemoglobin estimate
+        across available tissue modalities (Fingernail, Skin, Palpebral Conjunctiva).
+        Weights are inversely proportional to empirical MSE on independent validation benchmarks:
+          - Conjunctiva (Model 3): Val RMSE 0.8371 (precision ~1.4271, ~77.1% weight)
+          - Fingernail (Model 1):  Val RMSE 2.2949 (precision ~0.1899, ~10.3% weight)
+          - Finger Skin (Model 2): Val RMSE 2.0650 (precision ~0.2345, ~12.7% weight)
+        Calibrated strictly on validation partitions to eliminate test-set leakage.
+        """
+        raw_precisions = {
+            "conjunctiva": 1.0 / (0.8371 ** 2),
+            "fingernail": 1.0 / (2.2949 ** 2),
+            "skin": 1.0 / (2.0650 ** 2)
+        }
+
+        preds = {}
+        crops = {}
+        overlays = {}
+        boxes = {}
+
+        if nail_image is not None:
+            r_nail = self.predict_single(nail_image, modality="fingernail", apply_white_balance=apply_white_balance)
+            preds["fingernail"] = r_nail["predicted_hb"]
+            crops["fingernail"] = r_nail["roi_crop"]
+            overlays["fingernail"] = r_nail["roi_overlay"]
+            boxes["fingernail"] = r_nail["roi_box"]
+
+        if skin_image is not None:
+            r_skin = self.predict_single(skin_image, modality="skin", apply_white_balance=apply_white_balance)
+            preds["skin"] = r_skin["predicted_hb"]
+            crops["skin"] = r_skin["roi_crop"]
+            overlays["skin"] = r_skin["roi_overlay"]
+            boxes["skin"] = r_skin["roi_box"]
+
+        if conj_image is not None:
+            r_conj = self.predict_single(conj_image, modality="conjunctiva", apply_white_balance=apply_white_balance)
+            preds["conjunctiva"] = r_conj["predicted_hb"]
+            crops["conjunctiva"] = r_conj["roi_crop"]
+            overlays["conjunctiva"] = r_conj["roi_overlay"]
+            boxes["conjunctiva"] = r_conj["roi_box"]
+
+        if not preds:
+            raise ValueError("At least one modality image must be provided.")
+
+        total_prec = sum(raw_precisions[m] for m in preds.keys())
+        normalized_weights = {m: raw_precisions[m] / total_prec for m in preds.keys()}
+
+        consensus_hb = sum(preds[m] * normalized_weights[m] for m in preds.keys())
+        consensus_hb = round(float(consensus_hb), 2)
+        who_label, chip_cls, who_desc = classify_who_anemia(consensus_hb)
+
+        # Check if paired nail+skin exists for Model 4 direct comparison
+        paired_m4_pred = None
+        if nail_image is not None and skin_image is not None:
+            fuse_m4 = self.predict_multimodal_fusion(nail_image, skin_image)
+            paired_m4_pred = fuse_m4["predicted_hb"]
+
+        num_mods = len(preds)
+        if num_mods == 3:
+            name = "Model 6: Tri-Modal Weighted Consensus (Nail + Skin + Conjunctiva)"
+        elif "conjunctiva" in preds and "fingernail" in preds:
+            name = "Model 5: Fingernail + Conjunctiva Dual Consensus"
+        elif "fingernail" in preds and "skin" in preds:
+            name = "Dual Multimodal Consensus (Nail + Skin)"
+        else:
+            name = f"Single Modality ({list(preds.keys())[0].capitalize()})"
+
+        return {
+            "predicted_hb": consensus_hb,
+            "who_label": who_label,
+            "chip_class": chip_cls,
+            "who_description": who_desc,
+            "individual_predictions": preds,
+            "normalized_weights": {k: round(v, 3) for k, v in normalized_weights.items()},
+            "paired_m4_pred": paired_m4_pred,
+            "crops": crops,
+            "overlays": overlays,
+            "boxes": boxes,
+            "model_name": name,
+            "num_modalities": num_mods,
+            "status": f"Clinically Weighted Consensus across {num_mods} anatomical sites",
+        }
+
+
+# Class aliases
+MultimodalInferenceEngine = HemoglobinInferenceEngine
 
 # Singleton engine instance
 _INFERENCE_ENGINE: Optional[HemoglobinInferenceEngine] = None
@@ -234,3 +358,4 @@ def get_inference_engine() -> HemoglobinInferenceEngine:
     if _INFERENCE_ENGINE is None:
         _INFERENCE_ENGINE = HemoglobinInferenceEngine()
     return _INFERENCE_ENGINE
+

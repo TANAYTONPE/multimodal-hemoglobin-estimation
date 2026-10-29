@@ -16,9 +16,26 @@ if _src_dir not in sys.path:
 __version__ = "2.0.0"
 __author__ = "Tanay Tonpe"
 
-from .preprocessing import get_train_transforms, get_val_transforms, HemoglobinDataset
-from .roi_extractor import auto_detect_roi, draw_roi_overlay, crop_roi_by_box
-from .feature_extractor import get_feature_extractor, extract_color_features
+from .preprocessing import (
+    get_train_transforms,
+    get_val_transforms,
+    HemoglobinDataset,
+    apply_gray_world_white_balance,
+)
+from .roi_extractor import (
+    auto_detect_roi,
+    draw_roi_overlay,
+    crop_roi_by_box,
+    assess_image_quality,
+    detect_specular_glare_mask,
+    detect_hand_nail_roi,
+    detect_eye_conjunctiva_roi,
+)
+from .feature_extractor import (
+    get_feature_extractor,
+    extract_color_features,
+    generate_erythema_heatmap,
+)
 from .models import (
     FingernailModel,
     SkinModel,
@@ -27,17 +44,28 @@ from .models import (
     MainProposedMultimodalModel,
 )
 from .models_multimodal import TriModalHemoglobinNet, SklearnHbRegressor, evaluate_predictions
-from .inference_pipeline import get_inference_engine, MultimodalInferenceEngine, classify_who_anemia
+from .inference_pipeline import (
+    get_inference_engine,
+    HemoglobinInferenceEngine,
+    MultimodalInferenceEngine,
+    classify_who_anemia,
+)
 
 __all__ = [
     "get_train_transforms",
     "get_val_transforms",
     "HemoglobinDataset",
+    "apply_gray_world_white_balance",
     "auto_detect_roi",
     "draw_roi_overlay",
     "crop_roi_by_box",
+    "assess_image_quality",
+    "detect_specular_glare_mask",
+    "detect_hand_nail_roi",
+    "detect_eye_conjunctiva_roi",
     "get_feature_extractor",
     "extract_color_features",
+    "generate_erythema_heatmap",
     "FingernailModel",
     "SkinModel",
     "ConjunctivalModel",
@@ -47,6 +75,7 @@ __all__ = [
     "SklearnHbRegressor",
     "evaluate_predictions",
     "get_inference_engine",
+    "HemoglobinInferenceEngine",
     "MultimodalInferenceEngine",
     "classify_who_anemia",
 ]

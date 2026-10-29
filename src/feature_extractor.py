@@ -35,25 +35,33 @@ CNN_TRANSFORM = T.Compose([
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def extract_color_features(pil_image: Image.Image) -> np.ndarray:
+def extract_color_features(pil_image: Image.Image, filter_glare: bool = True) -> np.ndarray:
     """
     Extract 16-dimensional color descriptor vector from an ROI patch:
     - RGB: mean (R, G, B), std (R, G, B) [6]
     - Ratios: Norm R, Norm G, Norm B, R/G ratio, Erythema Index [5]
     - HSV: mean (H, S, V) [3]
     - LAB: mean a* (green-red chromaticity biomarker), mean L* [2]
+    Optional glare filtering ensures specular reflections do not corrupt optical biomarkers.
     """
     img_rgb = pil_image.convert("RGB")
     arr = np.array(img_rgb).astype(np.float64) / 255.0  # normalize to [0, 1]
+
+    # Optional specular glare rejection mask (overexposed white hot-spots)
+    valid_mask = np.ones(arr.shape[:2], dtype=bool)
+    if filter_glare:
+        glare = (arr[..., 0] > 0.94) & (arr[..., 1] > 0.94) & (arr[..., 2] > 0.94)
+        if np.sum(~glare) >= 100:
+            valid_mask = ~glare
 
     # RGB statistics
     r = arr[..., 0]
     g = arr[..., 1]
     b = arr[..., 2]
 
-    mean_r, std_r = float(r.mean()), float(r.std())
-    mean_g, std_g = float(g.mean()), float(g.std())
-    mean_b, std_b = float(b.mean()), float(b.std())
+    mean_r, std_r = float(r[valid_mask].mean()), float(r[valid_mask].std())
+    mean_g, std_g = float(g[valid_mask].mean()), float(g[valid_mask].std())
+    mean_b, std_b = float(b[valid_mask].mean()), float(b[valid_mask].std())
 
     # Normalized color ratios
     total_intensity = mean_r + mean_g + mean_b + 1e-6
@@ -67,9 +75,9 @@ def extract_color_features(pil_image: Image.Image) -> np.ndarray:
     # HSV space
     img_hsv = pil_image.convert("HSV")
     arr_hsv = np.array(img_hsv).astype(np.float64) / 255.0
-    mean_h = float(arr_hsv[..., 0].mean())
-    mean_s = float(arr_hsv[..., 1].mean())
-    mean_v = float(arr_hsv[..., 2].mean())
+    mean_h = float(arr_hsv[..., 0][valid_mask].mean())
+    mean_s = float(arr_hsv[..., 1][valid_mask].mean())
+    mean_v = float(arr_hsv[..., 2][valid_mask].mean())
 
     # Approximate CIELAB L* and a* (a* strongly tracks vascular redness/erythema)
     # Using standard linear sRGB -> XYZ -> LAB approximation
@@ -98,6 +106,35 @@ def extract_color_features(pil_image: Image.Image) -> np.ndarray:
     return color_vec
 
 
+def generate_erythema_heatmap(
+    pil_image: Image.Image,
+    alpha: float = 0.50,
+    colormap_name: str = "plasma"
+) -> Image.Image:
+    """
+    Computes a dense, pixel-resolution microvascular Erythema Index map:
+        EI(x, y) = log(R(x, y) + eps) - log(G(x, y) + eps)
+    Visualizes dense hemoglobin absorption and capillary pooling across the tissue.
+    """
+    import matplotlib.pyplot as plt
+    img_rgb = pil_image.convert("RGB").resize((224, 224))
+    arr = np.array(img_rgb).astype(np.float32) / 255.0
+    r = arr[..., 0]
+    g = arr[..., 1]
+
+    ei_map = np.log(r + 1e-4) - np.log(g + 1e-4)
+    p2 = float(np.percentile(ei_map, 2))
+    p98 = float(np.percentile(ei_map, 98))
+    ei_norm = np.clip((ei_map - p2) / (p98 - p2 + 1e-8), 0.0, 1.0)
+
+    cmap = plt.get_cmap(colormap_name)
+    heat_rgb = (cmap(ei_norm)[..., :3] * 255).astype(np.uint8)
+
+    orig_uint8 = np.array(img_rgb, dtype=np.uint8)
+    blended = (alpha * orig_uint8 + (1.0 - alpha) * heat_rgb).astype(np.uint8)
+    return Image.fromarray(blended)
+
+
 class DeepFeatureExtractor:
     """
     Singleton-style feature extractor leveraging pretrained EfficientNet-B0.
@@ -122,6 +159,60 @@ class DeepFeatureExtractor:
         tensor = CNN_TRANSFORM(pil_image).unsqueeze(0).to(self.device)
         feats = self.backbone(tensor)
         return feats.squeeze(0).cpu().numpy().astype(np.float32)
+
+    @torch.no_grad()
+    def generate_cam_heatmap(
+        self,
+        pil_image: Image.Image,
+        weights: Optional[np.ndarray] = None,
+        alpha: float = 0.55,
+        colormap_name: str = "jet"
+    ) -> Image.Image:
+        """
+        Computes a deep Regression Activation Map (CAM) / Visual Saliency Heatmap
+        from EfficientNet-B0's final convolutional layer (features[8]).
+        If weights are provided (e.g., reg.coef_[:1280]), computes the exact
+        spatial contribution to the hemoglobin prediction.
+        """
+        import matplotlib.pyplot as plt
+        import torch.nn.functional as F
+
+        img_crop = pil_image.convert("RGB").resize((224, 224))
+        tensor = CNN_TRANSFORM(img_crop).unsqueeze(0).to(self.device)
+        feat_maps = self.backbone.features(tensor)  # (1, 1280, 7, 7)
+
+        if weights is not None:
+            w_arr = np.asarray(weights, dtype=np.float32)[:1280]
+            w_tensor = torch.from_numpy(w_arr).to(self.device).view(1, 1280, 1, 1)
+            cam = (feat_maps * w_tensor).sum(dim=1, keepdim=True)  # (1, 1, 7, 7)
+        else:
+            cam = feat_maps.mean(dim=1, keepdim=True)
+
+        cam_up = F.interpolate(cam, size=(224, 224), mode="bicubic", align_corners=False).squeeze().cpu().numpy()
+        min_v, max_v = float(cam_up.min()), float(cam_up.max())
+        cam_norm = (cam_up - min_v) / (max_v - min_v + 1e-8)
+
+        cmap = plt.get_cmap(colormap_name)
+        heat_rgb = (cmap(cam_norm)[..., :3] * 255).astype(np.uint8)
+
+        orig_uint8 = np.array(img_crop, dtype=np.uint8)
+        blended = (alpha * orig_uint8 + (1.0 - alpha) * heat_rgb).astype(np.uint8)
+        return Image.fromarray(blended)
+
+    def generate_explainability_maps(
+        self,
+        pil_image: Image.Image,
+        weights: Optional[np.ndarray] = None
+    ) -> Dict[str, Image.Image]:
+        """
+        Generates both Deep Convolutional Saliency Map and Biophysical Erythema Map.
+        """
+        cam = self.generate_cam_heatmap(pil_image, weights=weights, alpha=0.55)
+        erythema = generate_erythema_heatmap(pil_image, alpha=0.50)
+        return {
+            "cam_heatmap": cam,
+            "erythema_heatmap": erythema,
+        }
 
     def extract_single_patch_features(self, pil_image: Image.Image) -> np.ndarray:
         """Combine deep features (1280) and color features (16) -> 1296-dim vector."""
